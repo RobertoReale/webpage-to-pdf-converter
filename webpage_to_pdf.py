@@ -1,5 +1,6 @@
+# webpage_to_pdf_with_profiles.py
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -12,6 +13,8 @@ import os
 import base64
 from datetime import datetime
 import threading
+
+PROFILES_FILE = "chrome_profiles.json"
 
 class WebPageToPDFConverter:
     def __init__(self):
@@ -26,15 +29,52 @@ class WebPageToPDFConverter:
         self.processed_count = 0
         self.stop_requested = False
         self.driver_lock = threading.Lock()
-        
+
+        # Profile management
+# don't create StringVar yet (root not created)
+        self.load_profiles()
         self.create_gui()
 
+
+    # -------- profile persistence --------
+    def load_profiles(self):
+        try:
+            if os.path.exists(PROFILES_FILE):
+                with open(PROFILES_FILE, 'r', encoding='utf-8') as f:
+                    self.profiles = json.load(f)
+            else:
+                self.profiles = {}
+        except Exception:
+            self.profiles = {}
+
+    def save_profiles(self):
+        try:
+            with open(PROFILES_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.profiles, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print("Errore salvataggio profili:", e)
+
+    def add_profile(self, name, path):
+        self.profiles[name] = path
+        self.save_profiles()
+        self.refresh_profile_combobox()
+
+    def remove_profile(self, name):
+        if name in self.profiles:
+            del self.profiles[name]
+            self.save_profiles()
+            self.refresh_profile_combobox()
+
+    # -------- GUI --------
     def create_gui(self):
         """Create the main GUI window"""
         self.root = tk.Tk()
         self.root.title("Webpage to PDF Converter")
-        self.root.geometry("600x400")
+        self.root.geometry("700x480")
         self.root.resizable(True, True)
+
+        # Create the StringVar after root exists
+        self.profile_var = tk.StringVar(value="")
 
         # Create main frame with padding
         main_frame = ttk.Frame(self.root, padding="10")
@@ -42,55 +82,130 @@ class WebPageToPDFConverter:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
+        # Profile frame
+        profile_frame = ttk.LabelFrame(main_frame, text="Chrome Profile", padding="5")
+        profile_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        profile_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(profile_frame, text="Seleziona profilo:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=3)
+        self.profile_combobox = ttk.Combobox(profile_frame, textvariable=self.profile_var, state="readonly")
+        self.profile_combobox.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5, pady=3)
+        self.refresh_profile_combobox()
+
+        prof_button_frame = ttk.Frame(profile_frame)
+        prof_button_frame.grid(row=0, column=2, sticky=tk.E, padx=5)
+        ttk.Button(prof_button_frame, text="Nuovo profilo", command=self.create_new_profile).pack(side=tk.LEFT, padx=2)
+        ttk.Button(prof_button_frame, text="Rimuovi", command=self.remove_selected_profile).pack(side=tk.LEFT, padx=2)
+        ttk.Button(prof_button_frame, text="Apri cartella profilo", command=self.open_selected_profile_folder).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(profile_frame, text="Note: usa profili separati per processi paralleli.").grid(row=1, column=0, columnspan=3, sticky=tk.W, padx=5)
+
         # File selection frame
         file_frame = ttk.LabelFrame(main_frame, text="File Selection", padding="5")
-        file_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        file_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         file_frame.columnconfigure(1, weight=1)
 
         # List of URL files and directories
-        self.files_listbox = tk.Listbox(file_frame, height=5)
-        self.files_listbox.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=5, pady=5)
+        self.files_listbox = tk.Listbox(file_frame, height=6)
+        self.files_listbox.grid(row=0, column=0, columnspan=3, sticky=(tk.W, tk.E), padx=5, pady=5)
 
         # Add and Remove buttons
         button_frame = ttk.Frame(file_frame)
-        button_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
-        
+        button_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
         ttk.Button(button_frame, text="Add URL File & Directory", command=self.add_url_file_and_dir).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Remove Selected", command=self.remove_selected).pack(side=tk.LEFT, padx=5)
 
         # Progress frame
         progress_frame = ttk.LabelFrame(main_frame, text="Progress", padding="5")
-        progress_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        progress_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         progress_frame.columnconfigure(0, weight=1)
 
         # Progress bar
         self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(progress_frame, length=300, mode='determinate', variable=self.progress_var)
+        self.progress_bar = ttk.Progressbar(progress_frame, length=400, mode='determinate', variable=self.progress_var)
         self.progress_bar.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=5, pady=5)
 
         # Status label
         self.status_var = tk.StringVar(value="Ready")
-        self.status_label = ttk.Label(progress_frame, textvariable=self.status_var, wraplength=550)
+        self.status_label = ttk.Label(progress_frame, textvariable=self.status_var, wraplength=650)
         self.status_label.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=5)
 
         # Current URL label
         self.url_var = tk.StringVar(value="")
-        self.url_label = ttk.Label(progress_frame, textvariable=self.url_var, wraplength=550)
+        self.url_label = ttk.Label(progress_frame, textvariable=self.url_var, wraplength=650)
         self.url_label.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=5)
 
         # Control buttons
-        button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
-        
-        self.start_button = ttk.Button(button_frame, text="Start", command=self.start_conversion)
+        button_frame2 = ttk.Frame(main_frame)
+        button_frame2.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+
+        self.start_button = ttk.Button(button_frame2, text="Start", command=self.start_conversion)
         self.start_button.pack(side=tk.LEFT, padx=5)
-        
-        self.pause_button = ttk.Button(button_frame, text="Pause", command=self.toggle_pause, state=tk.DISABLED)
+
+        self.pause_button = ttk.Button(button_frame2, text="Pause", command=self.toggle_pause, state=tk.DISABLED)
         self.pause_button.pack(side=tk.LEFT, padx=5)
-        
-        self.stop_button = ttk.Button(button_frame, text="Stop", command=self.stop_conversion, state=tk.DISABLED)
+
+        self.stop_button = ttk.Button(button_frame2, text="Stop", command=self.stop_conversion, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5)
 
+    def refresh_profile_combobox(self):
+        names = list(self.profiles.keys())
+        self.profile_combobox['values'] = names
+        if names:
+            # if current value not in list, choose first
+            if self.profile_var.get() not in names:
+                self.profile_var.set(names[0])
+        else:
+            self.profile_var.set("")
+
+    def create_new_profile(self):
+        """Ask user for profile name and folder; user should configure Chrome manually on first launch."""
+        name = simpledialog.askstring("Nome profilo", "Inserisci un nome per il nuovo profilo:")
+        if not name:
+            return
+        # choose or create directory for the profile
+        path = filedialog.askdirectory(title="Seleziona (o crea) la cartella per il profilo Chrome")
+        if not path:
+            return
+        # ensure directory exists
+        os.makedirs(path, exist_ok=True)
+        # save
+        self.add_profile(name, path)
+        messagebox.showinfo("Profilo creato",
+            f"Profilo '{name}' creato.\n\nQuando avvierai Chrome con questo profilo, effettua login e configura le estensioni.\nNon avviare la stessa cartella di profilo da più Chrome contemporaneamente.")
+        self.profile_var.set(name)
+
+    def remove_selected_profile(self):
+        name = self.profile_var.get()
+        if not name:
+            messagebox.showwarning("Nessun profilo", "Nessun profilo selezionato.")
+            return
+        if messagebox.askyesno("Conferma rimozione", f"Rimuovere il profilo '{name}' dalla lista (la cartella non verrà cancellata)?"):
+            self.remove_profile(name)
+
+    def open_selected_profile_folder(self):
+        name = self.profile_var.get()
+        if not name:
+            messagebox.showwarning("Nessun profilo", "Nessun profilo selezionato.")
+            return
+        path = self.profiles.get(name)
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Cartella non trovata", "La cartella del profilo non esiste.")
+            return
+        # Open folder in file explorer
+        try:
+            if os.name == 'nt':
+                os.startfile(path)
+            elif os.name == 'posix':
+                # try xdg-open or open
+                if os.system(f'xdg-open "{path}"') != 0:
+                    os.system(f'open "{path}"')
+            else:
+                messagebox.showinfo("Cartella profilo", path)
+        except Exception:
+            messagebox.showinfo("Cartella profilo", path)
+
+    # -------- existing functions slightly adapted --------
     def add_url_file_and_dir(self):
         """Add a URL file and its corresponding output directory"""
         url_file = filedialog.askopenfilename(
@@ -118,10 +233,10 @@ class WebPageToPDFConverter:
             WebDriverWait(self.driver, timeout).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
-            
+
             # Wait for network requests to finish
             time.sleep(2)
-            
+
             # Try to ensure dynamic content is loaded by checking document.readyState
             ready_state_script = "return document.readyState"
             start_time = time.time()
@@ -132,7 +247,7 @@ class WebPageToPDFConverter:
                     time.sleep(2)
                     return True
                 time.sleep(0.5)
-            
+
             return False
         except Exception as e:
             self.status_var.set(f"Error waiting for page load: {str(e)}")
@@ -169,10 +284,10 @@ class WebPageToPDFConverter:
 
                 # Generate PDF
                 result = self.driver.execute_cdp_cmd('Page.printToPDF', pdf_params)
-                
+
                 if not isinstance(result, dict) or 'data' not in result:
                     raise Exception("Invalid PDF data structure received")
-                
+
                 try:
                     pdf_bytes = base64.b64decode(result['data'])
                     if len(pdf_bytes) < 1024:  # Less than 1KB
@@ -188,7 +303,7 @@ class WebPageToPDFConverter:
                     raise Exception(f"All PDF generation attempts failed: {str(e)}")
                 time.sleep(2)  # Wait before retry
                 continue
-        
+
         raise Exception("PDF generation failed after all attempts")
 
     def save_as_pdf(self, url):
@@ -199,7 +314,7 @@ class WebPageToPDFConverter:
 
             self.current_url = url
             self.url_var.set(f"Processing: {url}")
-            
+
             # Load the page
             self.driver.get(url)
             if not self.wait_for_page_load(timeout=30):
@@ -207,32 +322,32 @@ class WebPageToPDFConverter:
 
             # Generate PDF with retry mechanism
             pdf_bytes = self.generate_pdf_with_retry()
-            
+
             # Create filename from URL
             safe_url = url.split('//')[-1].replace('/', '_')
             safe_url = ''.join(c for c in safe_url if c.isalnum() or c in '_-.')[:100]
             filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_url}.pdf"
             filepath = os.path.join(self.output_dir, filename)
-            
+
             # Save PDF
             with open(filepath, 'wb') as f:
                 f.write(pdf_bytes)
-            
+
             # Verify file size
             file_size = os.path.getsize(filepath)
             if file_size < 1024:  # Less than 1KB
                 os.remove(filepath)  # Delete invalid file
                 raise Exception("Generated PDF is too small")
-            
+
             self.status_var.set(f"Saved: {filename} ({file_size/1024:.1f} KB)")
             return True
-            
+
         except Exception as e:
             self.status_var.set(f"Error processing {url}: {str(e)}")
             return False
 
     def initialize_driver(self):
-        """Initialize Chrome driver with optimized settings"""
+        """Initialize Chrome driver with optimized settings and optional profile selection"""
         with self.driver_lock:  # Ensure thread-safe driver initialization
             try:
                 # If driver exists and is responsive, reuse it
@@ -254,7 +369,17 @@ class WebPageToPDFConverter:
                 chrome_options.add_argument('--no-sandbox')
                 chrome_options.add_argument('--disable-dev-shm-usage')
                 chrome_options.add_argument('--force-device-scale-factor=1')
-                
+
+                # If a profile is selected, use it
+                selected_profile_name = self.profile_var.get()
+                if selected_profile_name and selected_profile_name in self.profiles:
+                    profile_path = self.profiles[selected_profile_name]
+                    # Use the folder as user-data-dir
+                    chrome_options.add_argument(f'--user-data-dir={profile_path}')
+                else:
+                    # Default: no explicit user-data-dir -> Chrome will create a temporary profile
+                    pass
+
                 # Set basic printing preferences without specific output directory
                 chrome_options.add_experimental_option('prefs', {
                     'printing.print_preview_sticky_settings.appState': json.dumps({
@@ -267,27 +392,35 @@ class WebPageToPDFConverter:
                         'version': 2
                     })
                 })
-                
+
+                # Start driver
                 self.driver = webdriver.Chrome(options=chrome_options)
-                
+
                 # Enable necessary CDP domains
-                self.driver.execute_cdp_cmd('Page.enable', {})
-                self.driver.execute_cdp_cmd('Network.enable', {})
-                
-                # Only show configuration message if this is the first initialization
-                if not hasattr(self, 'initial_config_done'):
-                    self.status_var.set("Chrome opened for manual configuration. Configure as needed and click OK when ready.")
-                    self.root.update()
-                    messagebox.showinfo("Manual Configuration", 
-                        "Please configure Chrome as needed:\n\n" +
-                        "- Login to required websites\n" +
-                        "- Set any necessary preferences\n" +
-                        "- Configure any required extensions\n\n" +
-                        "Click OK when you're ready to begin processing URLs.")
-                    self.initial_config_done = True
-                
+                try:
+                    self.driver.execute_cdp_cmd('Page.enable', {})
+                    self.driver.execute_cdp_cmd('Network.enable', {})
+                except Exception:
+                    pass
+
+                # If profile selected, inform user that driver started with that profile
+                if selected_profile_name:
+                    self.status_var.set(f"Chrome aperto con profilo '{selected_profile_name}'.")
+                else:
+                    # Only show configuration message if this is the first initialization
+                    if not hasattr(self, 'initial_config_done'):
+                        self.status_var.set("Chrome opened for manual configuration. Configure as needed and click OK when ready.")
+                        self.root.update()
+                        messagebox.showinfo("Manual Configuration",
+                            "Chrome è stato aperto.\n\n" +
+                            "- Seleziona un profilo (o creane uno) prima di avviare la conversione,\n" +
+                            "- fai login ai siti necessari,\n" +
+                            "- configura estensioni se serve.\n\n" +
+                            "Click OK quando sei pronto per procedere.")
+                        self.initial_config_done = True
+
                 return True
-                
+
             except Exception as e:
                 self.status_var.set(f"Error initializing Chrome: {str(e)}")
                 messagebox.showerror("Error", f"Failed to initialize Chrome:\n{str(e)}")
@@ -302,36 +435,36 @@ class WebPageToPDFConverter:
             total_urls_all_files = 0
             # First count total URLs across all files
             for url_file, _ in self.url_files_and_dirs:
-                with open(url_file, 'r') as f:
+                with open(url_file, 'r', encoding='utf-8') as f:
                     total_urls_all_files += sum(1 for line in f if line.strip())
-            
+
             self.total_urls = total_urls_all_files
             self.processed_count = 0
             self.stop_requested = False
-            
+
             self.status_var.set(f"Starting conversion of {self.total_urls} URLs across {len(self.url_files_and_dirs)} files...")
-            
+
             # Process each file
             for url_file, output_dir in self.url_files_and_dirs:
                 if self.stop_requested:
                     break
-                
+
                 self.status_var.set(f"Processing file: {os.path.basename(url_file)}")
-                
-                with open(url_file, 'r') as f:
+
+                with open(url_file, 'r', encoding='utf-8') as f:
                     urls = [line.strip() for line in f if line.strip()]
-                
+
                 for url in urls:
                     if self.stop_requested:
                         break
-                        
+
                     while self.paused and not self.stop_requested:
                         time.sleep(0.5)
                         continue
-                    
+
                     if not self.processing:
                         break
-                    
+
                     try:
                         with self.driver_lock:
                             # Update the output directory for the current file
@@ -339,7 +472,7 @@ class WebPageToPDFConverter:
                             if self.save_as_pdf(url):
                                 self.processed_count += 1
                                 self.progress_var.set((self.processed_count / self.total_urls) * 100)
-                            
+
                     except WebDriverException as e:
                         if "invalid session id" in str(e).lower() or "no such session" in str(e).lower():
                             self.status_var.set("Attempting to recover browser session...")
@@ -352,13 +485,13 @@ class WebPageToPDFConverter:
                         self.status_var.set(f"Error processing {url}: {str(e)}")
                         time.sleep(2)
                         continue
-                    
+
                     time.sleep(1)
-            
+
             final_status = f"Conversion completed. {self.processed_count} of {self.total_urls} URLs processed."
             self.status_var.set(final_status)
             messagebox.showinfo("Complete", final_status)
-            
+
         except Exception as e:
             self.status_var.set(f"Error in processing: {str(e)}")
             messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
@@ -374,7 +507,7 @@ class WebPageToPDFConverter:
                     self.driver = None
             except Exception:
                 pass
-            
+
         self.processing = False
         self.start_button.config(state=tk.NORMAL)
         self.pause_button.config(state=tk.DISABLED)
@@ -385,15 +518,25 @@ class WebPageToPDFConverter:
         if not self.url_files_and_dirs:
             messagebox.showerror("Error", "Please add at least one URL file and output folder pair.")
             return
-            
+
+        # If a profile is selected, warn user about concurrent Chrome uses
+        selected_profile_name = self.profile_var.get()
+        if selected_profile_name:
+            profile_path = self.profiles.get(selected_profile_name)
+            if profile_path and os.path.exists(profile_path):
+                if messagebox.askyesno("Conferma profilo", f"Usare il profilo '{selected_profile_name}' per questa sessione?\n\nAssicurati che nessun altro Chrome stia usando questa cartella."):
+                    pass
+                else:
+                    return
+
         self.processing = True
         self.paused = False
         self.progress_var.set(0)
-        
+
         self.start_button.config(state=tk.DISABLED)
         self.pause_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.NORMAL)
-        
+
         threading.Thread(target=self.process_urls, daemon=True).start()
 
     def toggle_pause(self):
@@ -401,7 +544,7 @@ class WebPageToPDFConverter:
         self.paused = not self.paused
         self.pause_button.config(text="Resume" if self.paused else "Pause")
         self.status_var.set("Paused" if self.paused else "Resuming...")
-        
+
         if not self.paused:  # If resuming
             # Check if driver is still alive before resuming
             try:
